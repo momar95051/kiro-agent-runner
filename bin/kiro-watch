@@ -2,7 +2,9 @@
 # kiro-watch — Live tail of Kiro/Claude agent activity log
 # Works from any directory. Log always at ~/.kiro-runner/activity.log
 
-RUNNER_REPO="$(cd "$(dirname "${BASH_SOURCE[0]:-${(%):-%x}}")/.." && pwd)"
+_SCRIPT="${BASH_SOURCE[0]:-${(%):-%x}}"
+_SCRIPT="$(readlink -f "$_SCRIPT" 2>/dev/null || python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$_SCRIPT")"
+RUNNER_REPO="$(cd "$(dirname "$_SCRIPT")/.." && pwd)"
 source "$RUNNER_REPO/lib/common.sh"
 
 LOG="$RUNNER_ACTIVITY_LOG"

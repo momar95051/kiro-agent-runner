@@ -8,7 +8,7 @@
 
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-${(%):-%x}}")" && pwd)"
+REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]:-${(%):-%x}}" 2>/dev/null || echo "${BASH_SOURCE[0]:-${(%):-%x}}")")" && pwd)"
 source "$REPO_DIR/lib/common.sh"
 
 echo ""
