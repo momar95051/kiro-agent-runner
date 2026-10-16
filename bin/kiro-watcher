@@ -11,6 +11,7 @@ _SCRIPT="$(readlink -f "$_SCRIPT" 2>/dev/null || python3 -c "import os,sys; prin
 RUNNER_REPO="$(cd "$(dirname "$_SCRIPT")/.." && pwd)"
 source "$RUNNER_REPO/lib/common.sh"
 source "$RUNNER_REPO/lib/memory.sh"
+source "$RUNNER_REPO/lib/tmux.sh"
 
 JOB_DIR="${${1:?Usage: $0 <job_dir> <worker_session> [interval_minutes]}:A}"
 WORKER_SESSION="${2:?Usage: $0 <job_dir> <worker_session> [interval_minutes]}"
@@ -27,16 +28,14 @@ log() {
   echo "[$ts] $*" | tee -a "$WATCHER_LOG"
 }
 
-worker_running() { tmux has-session -t "$WORKER_SESSION" 2>/dev/null; }
+worker_running() { tmux_has "$WORKER_SESSION"; }
 
 capture_screen() {
-  tmux capture-pane -t "$WORKER_SESSION" -p 2>/dev/null || echo "(could not capture pane)"
+  tmux_capture "$WORKER_SESSION" || echo "(could not capture pane)"
 }
 
 nudge() {
-  tmux send-keys -t "$WORKER_SESSION" "" Enter 2>/dev/null
-  sleep 1
-  tmux send-keys -t "$WORKER_SESSION" "$1" Enter 2>/dev/null
+  claude_submit "$WORKER_SESSION" "$1" || log "⚠️  Nudge typed but worker did not start working"
 }
 
 notify() {

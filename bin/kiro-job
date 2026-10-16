@@ -17,6 +17,7 @@ RUNNER_REPO="$(cd "$(dirname "$_SCRIPT")/.." && pwd)"
 source "$RUNNER_REPO/lib/common.sh"
 source "$RUNNER_REPO/lib/preflight.sh"
 source "$RUNNER_REPO/lib/memory.sh"
+source "$RUNNER_REPO/lib/tmux.sh"
 
 JOB="${1:?Usage: $0 <job_name> [project_dir] [interval_minutes]}"
 PROJECT_DIR="${${2:-$PWD}:A}"
@@ -63,8 +64,8 @@ echo ""
 
 # ── Kill existing sessions ─────────────────────────────────────────────────────
 
-tmux kill-session -t "$WORKER_SESSION"  2>/dev/null && log_warn "Killed existing worker session" || true
-tmux kill-session -t "$MONITOR_SESSION" 2>/dev/null && log_warn "Killed existing monitor session" || true
+tmux_kill "$WORKER_SESSION"  && log_warn "Killed existing worker session" || true
+tmux_kill "$MONITOR_SESSION" && log_warn "Killed existing monitor session" || true
 
 # ── Launch worker ─────────────────────────────────────────────────────────────
 
@@ -73,58 +74,36 @@ log_step "Launching worker..."
 tmux new-session -d -s "$WORKER_SESSION" -x 220 -y 50
 
 # Avoid /tmp issues on macOS
-tmux send-keys -t "$WORKER_SESSION" \
+tmux_keys "$WORKER_SESSION" \
   "export TMPDIR=\"$HOME/.claude-tmp\" && mkdir -p \"\$TMPDIR\"" Enter
 sleep 0.5
 
-tmux send-keys -t "$WORKER_SESSION" "cd $PROJECT_DIR" Enter
+tmux_keys "$WORKER_SESSION" "cd ${(q)PROJECT_DIR}" Enter
 sleep 0.5
 
-# Inject profile context as an env var the goal line can reference
-PROFILE_SUMMARY=$(read_profile | head -10)
-
-tmux send-keys -t "$WORKER_SESSION" "claude --dangerously-skip-permissions" Enter
+tmux_keys "$WORKER_SESSION" "claude --dangerously-skip-permissions" Enter
 
 # ── Wait for Claude to be ready ───────────────────────────────────────────────
-# Claude shows a folder trust prompt on first run, or goes straight to the
-# prompt if the folder is already trusted. Either way, wait until the screen
-# shows something we can interact with before sending the goal.
+# Claude shows a folder trust dialog on first run in a folder. Sending the goal
+# while it is up loses the goal, so wait for the empty input prompt first.
 
 log_step "Waiting for Claude Code to be ready..."
 
-READY=false
-for i in $(seq 1 30); do
-  SCREEN=$(tmux capture-pane -t "$WORKER_SESSION" -p 2>/dev/null || echo "")
-
-  # Trust prompt detected — answer yes (option 1 = Yes, trust)
-  if echo "$SCREEN" | grep -q "Trust\|trust\|Yes, I trust\|Do you trust"; then
-    log_warn "Trust prompt detected — accepting..."
-    tmux send-keys -t "$WORKER_SESSION" "1" Enter
-    sleep 2
-    continue
-  fi
-
-  # Ready when we see the Claude prompt (> or ?)
-  if echo "$SCREEN" | grep -qE "^\s*>\s*$|^\s*\?\s*$|You can now|What would you like"; then
-    log_info "Claude Code is ready (${i}s)"
-    READY=true
-    break
-  fi
-
-  sleep 1
-done
-
-if [[ "$READY" != "true" ]]; then
-  log_warn "Claude did not show a ready prompt after 30s — sending goal anyway"
+if ! claude_wait_ready "$WORKER_SESSION" 60; then
+  log_error "Claude Code did not reach its input prompt within 60s — goal not sent."
+  log_error "Check it with: tmux attach -t =$WORKER_SESSION"
+  exit 1
 fi
-
-sleep 1
 
 # Keep goal line short — point at the brief file
 GOAL_LINE="/goal See $BRIEF for the full job definition. Work through it autonomously. Re-read $JOB_DIR/decisions.md each turn — newer entries override the brief. Write your current status to $JOB_DIR/state.md after each step. If you cannot proceed without a human decision, write BLOCKED: <reason> to $JOB_DIR/state.md and stop cleanly."
 
-tmux send-keys -t "$WORKER_SESSION" "$GOAL_LINE" Enter
-log_info "Worker launched in session: $WORKER_SESSION"
+if claude_submit "$WORKER_SESSION" "$GOAL_LINE"; then
+  log_info "Worker launched in session: $WORKER_SESSION"
+else
+  log_error "Goal was typed but Claude did not start working — check: tmux attach -t =$WORKER_SESSION"
+  exit 1
+fi
 
 # ── Launch monitor ────────────────────────────────────────────────────────────
 
@@ -133,15 +112,14 @@ log_step "Launching monitor..."
 tmux new-session -d -s "$MONITOR_SESSION" -x 220 -y 50
 
 # Left pane: watcher
-tmux send-keys -t "$MONITOR_SESSION" \
+tmux_keys "$MONITOR_SESSION" \
   "$RUNNER_REPO/bin/kiro-watcher \"$JOB_DIR\" \"$WORKER_SESSION\" \"$INTERVAL\"" Enter
 
 # Right pane: activity feed
-tmux split-window -h -t "$MONITOR_SESSION"
-tmux send-keys -t "$MONITOR_SESSION" \
-  "$RUNNER_REPO/bin/kiro-watch" Enter
+tmux split-window -h -t "=$MONITOR_SESSION:"
+tmux send-keys -t "=$MONITOR_SESSION:" "$RUNNER_REPO/bin/kiro-watch" Enter
 
-tmux select-pane -t "$MONITOR_SESSION:0.0"
+tmux select-pane -t "=$MONITOR_SESSION:0.0"
 log_info "Monitor launched in session: $MONITOR_SESSION"
 
 # ── Attach ────────────────────────────────────────────────────────────────────
@@ -155,4 +133,4 @@ echo "    echo \"\$(date +%Y-%m-%d): your note\" >> $JOB_DIR/decisions.md"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-tmux attach -t "$MONITOR_SESSION"
+tmux attach -t "=$MONITOR_SESSION"
