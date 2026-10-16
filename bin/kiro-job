@@ -2,12 +2,17 @@
 # kiro-job — Launch a Claude Code worker + watcher for any project
 #
 # Usage:
-#   kiro-job <job_name> [project_dir] [interval_minutes]
+#   kiro-job [--fresh] <job_name> [project_dir] [interval_minutes]
+#
+#   --fresh  archive the previous run's state.md, decisions.md, watcher.md and
+#            watcher-run.log to .kiro/jobs/<job>/archive/<timestamp>/ and start
+#            from the templates (brief.md is kept)
 #
 # Examples:
 #   kiro-job startup-ideas                          # current dir, default interval
 #   kiro-job startup-ideas ~/projects/myapp         # explicit project dir
 #   kiro-job startup-ideas ~/projects/myapp 60      # check every 60 min
+#   kiro-job --fresh startup-ideas ~/projects/myapp 60
 
 set -euo pipefail
 
@@ -19,7 +24,17 @@ source "$RUNNER_REPO/lib/preflight.sh"
 source "$RUNNER_REPO/lib/memory.sh"
 source "$RUNNER_REPO/lib/tmux.sh"
 
-JOB="${1:?Usage: $0 <job_name> [project_dir] [interval_minutes]}"
+FRESH=false
+args=()
+for a in "$@"; do
+  case "$a" in
+    --fresh) FRESH=true ;;
+    *)       args+=("$a") ;;
+  esac
+done
+set -- "${args[@]}"
+
+JOB="${1:?Usage: $0 [--fresh] <job_name> [project_dir] [interval_minutes]}"
 PROJECT_DIR="${${2:-$PWD}:A}"
 JOB_DIR="$PROJECT_DIR/.kiro/jobs/$JOB"
 BRIEF="$JOB_DIR/brief.md"
@@ -30,6 +45,16 @@ INTERVAL="${3:-$DEFAULT_INTERVAL}"
 
 WORKER_SESSION="worker-$JOB"
 MONITOR_SESSION="monitor-$JOB"
+
+# Killing the session we are running in would end this script half-way
+if [[ -n "${TMUX:-}" ]]; then
+  CURRENT_SESSION="$(tmux display-message -p '#S')"
+  if [[ "$CURRENT_SESSION" == "$WORKER_SESSION" || "$CURRENT_SESSION" == "$MONITOR_SESSION" ]]; then
+    log_error "Running inside tmux session '$CURRENT_SESSION', which kiro-job replaces."
+    log_error "Run it from another terminal or tmux session."
+    exit 1
+  fi
+fi
 
 # ── Preflight ─────────────────────────────────────────────────────────────────
 
@@ -47,8 +72,19 @@ if [[ ! -f "$BRIEF" ]]; then
   fi
 fi
 
-# Scaffold missing state files from templates
 ensure_dir "$JOB_DIR"
+
+if [[ "$FRESH" == "true" ]]; then
+  ARCHIVE_DIR="$JOB_DIR/archive/$(date +%Y-%m-%d-%H%M)"
+  ensure_dir "$ARCHIVE_DIR"
+  for f in state.md decisions.md watcher.md watcher-run.log; do
+    [[ -f "$JOB_DIR/$f" ]] && mv "$JOB_DIR/$f" "$ARCHIVE_DIR/"
+  done
+  log_info "Previous run archived to $ARCHIVE_DIR"
+  log_warn "Output files the brief writes are not archived — move them yourself if needed"
+fi
+
+# Scaffold missing state files from templates
 [[ -f "$JOB_DIR/state.md" ]]     || cp "$RUNNER_REPO/templates/state.md"     "$JOB_DIR/state.md"
 [[ -f "$JOB_DIR/decisions.md" ]] || cp "$RUNNER_REPO/templates/decisions.md" "$JOB_DIR/decisions.md"
 [[ -f "$JOB_DIR/watcher.md" ]]   || cp "$RUNNER_REPO/templates/watcher.md"   "$JOB_DIR/watcher.md"
@@ -133,4 +169,8 @@ echo "    echo \"\$(date +%Y-%m-%d): your note\" >> $JOB_DIR/decisions.md"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-tmux attach -t "=$MONITOR_SESSION"
+if [[ -n "${TMUX:-}" ]]; then
+  tmux switch-client -t "=$MONITOR_SESSION"
+else
+  tmux attach -t "=$MONITOR_SESSION"
+fi

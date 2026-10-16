@@ -35,6 +35,19 @@ kiro-brief my-feature ~/projects/myapp
 kiro-job my-feature ~/projects/myapp 60   # check every 60 min
 ```
 
+### Re-run a job from scratch
+
+```zsh
+kiro-job --fresh my-feature ~/projects/myapp 60
+```
+
+`--fresh` moves the previous `state.md`, `decisions.md`, `watcher.md` and
+`watcher-run.log` to `.kiro/jobs/my-feature/archive/<timestamp>/` and starts from
+the templates. `brief.md` is kept. Output files the brief writes are not moved.
+
+Run `kiro-job` from a terminal other than the job's own `worker-*` or `monitor-*`
+tmux session: it replaces those sessions, and refuses to run inside one of them.
+
 ---
 
 ## During a job

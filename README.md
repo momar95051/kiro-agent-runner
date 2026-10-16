@@ -45,7 +45,7 @@ kiro-job   my-feature 60      # launch, check every 60 min
 |---|---|
 | `kiro-init` | One-time profile setup (long-term memory) |
 | `kiro-brief <name> [dir]` | Interactive scaffolding → writes brief.md |
-| `kiro-job <name> [dir] [interval]` | Launch worker + watcher |
+| `kiro-job [--fresh] <name> [dir] [interval]` | Launch worker + watcher (`--fresh` archives the previous run) |
 | `kiro-watcher <job_dir> <session> [interval]` | Watcher only |
 | `kiro-watch` | Live activity feed |
 
