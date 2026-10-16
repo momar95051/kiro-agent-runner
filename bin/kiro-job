@@ -84,7 +84,41 @@ sleep 0.5
 PROFILE_SUMMARY=$(read_profile | head -10)
 
 tmux send-keys -t "$WORKER_SESSION" "claude --dangerously-skip-permissions" Enter
-sleep 3
+
+# ── Wait for Claude to be ready ───────────────────────────────────────────────
+# Claude shows a folder trust prompt on first run, or goes straight to the
+# prompt if the folder is already trusted. Either way, wait until the screen
+# shows something we can interact with before sending the goal.
+
+log_step "Waiting for Claude Code to be ready..."
+
+READY=false
+for i in $(seq 1 30); do
+  SCREEN=$(tmux capture-pane -t "$WORKER_SESSION" -p 2>/dev/null || echo "")
+
+  # Trust prompt detected — answer yes (option 1 = Yes, trust)
+  if echo "$SCREEN" | grep -q "Trust\|trust\|Yes, I trust\|Do you trust"; then
+    log_warn "Trust prompt detected — accepting..."
+    tmux send-keys -t "$WORKER_SESSION" "1" Enter
+    sleep 2
+    continue
+  fi
+
+  # Ready when we see the Claude prompt (> or ?)
+  if echo "$SCREEN" | grep -qE "^\s*>\s*$|^\s*\?\s*$|You can now|What would you like"; then
+    log_info "Claude Code is ready (${i}s)"
+    READY=true
+    break
+  fi
+
+  sleep 1
+done
+
+if [[ "$READY" != "true" ]]; then
+  log_warn "Claude did not show a ready prompt after 30s — sending goal anyway"
+fi
+
+sleep 1
 
 # Keep goal line short — point at the brief file
 GOAL_LINE="/goal See $BRIEF for the full job definition. Work through it autonomously. Re-read $JOB_DIR/decisions.md each turn — newer entries override the brief. Write your current status to $JOB_DIR/state.md after each step. If you cannot proceed without a human decision, write BLOCKED: <reason> to $JOB_DIR/state.md and stop cleanly."
