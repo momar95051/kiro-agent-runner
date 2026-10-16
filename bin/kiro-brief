@@ -1,0 +1,166 @@
+#!/bin/zsh
+# kiro-brief — Interactive scaffolding: asks questions, writes brief.md
+#
+# Usage:
+#   kiro-brief <job_name> [project_dir]
+#
+# Example:
+#   kiro-brief startup-ideas ~/projects/myapp
+
+RUNNER_REPO="$(cd "$(dirname "${BASH_SOURCE[0]:-${(%):-%x}}")/.." && pwd)"
+source "$RUNNER_REPO/lib/common.sh"
+source "$RUNNER_REPO/lib/memory.sh"
+
+JOB="${1:?Usage: $0 <job_name> [project_dir]}"
+PROJECT_DIR="${${2:-$PWD}:A}"
+JOB_DIR="$PROJECT_DIR/.kiro/jobs/$JOB"
+BRIEF="$JOB_DIR/brief.md"
+
+log_section "kiro-brief — Scaffolding job: $JOB"
+
+# Check profile exists
+if [[ ! -f "$RUNNER_MEMORY/profile.md" ]] || grep -q "^name:$" "$RUNNER_MEMORY/profile.md"; then
+  log_warn "No profile found. Running kiro-init first..."
+  "$RUNNER_REPO/bin/kiro-init"
+fi
+
+# Load long-term memory
+PROFILE=$(read_profile)
+PREFERENCES=$(read_preferences)
+LEARNINGS=$(read_learnings)
+PAST_DECISIONS=$(read_long_term_decisions)
+
+# Default interval from preferences
+DEFAULT_INTERVAL=$(grep 'default_watcher_interval_minutes' "$RUNNER_MEMORY/preferences.md" 2>/dev/null | grep -o '[0-9]*' || echo "180")
+
+echo ""
+echo "I'll ask you a few questions, then use Claude to draft the brief."
+echo "You'll review it before anything is saved."
+echo ""
+
+# ── Questions ─────────────────────────────────────────────────────────────────
+
+GOAL=$(ask_multiline "What do you want done? (describe freely)")
+echo ""
+
+DONE_CRITERIA=$(ask_multiline "How do you know it's done? (list criteria, one per line)")
+echo ""
+
+CONSTRAINTS=$(ask_multiline "Any extra rules or constraints for this job? (blank for defaults only)")
+echo ""
+
+OUTPUT_LOCATION=$(ask "Where should output go?" "output/")
+INTERVAL=$(ask "Watcher check interval in minutes" "$DEFAULT_INTERVAL")
+
+# ── Synthesize with Claude ─────────────────────────────────────────────────────
+
+log_section "Drafting brief with Claude..."
+
+SYNTHESIS_PROMPT=$(cat <<PROMPT
+You are helping a founder scaffold a job brief for an autonomous Claude Code worker.
+
+## Founder Profile
+$PROFILE
+
+## Preferences
+$PREFERENCES
+
+## Past learnings from previous jobs
+$LEARNINGS
+
+## Input from the founder for this job
+
+Job name: $JOB
+Project directory: $PROJECT_DIR
+
+Goal (founder's words):
+$GOAL
+
+Done criteria (founder's words):
+$DONE_CRITERIA
+
+Extra constraints:
+$CONSTRAINTS
+
+Output location: $OUTPUT_LOCATION
+
+## Your task
+Write a complete brief.md for this job. It must include:
+
+1. **Background** — 3-5 bullet points summarising the founder's relevant background for THIS job specifically (pull from profile)
+2. **Goal** — rewrite the founder's goal as a clear, numbered list of done criteria
+3. **Proof Commands** — shell commands that prove each done criterion. Be concrete and runnable.
+4. **Process** — step-by-step approach the worker should follow
+5. **Rules** — merge the founder's constraints with the default preferences rules
+6. **Output structure** — the directory/file layout the worker should produce
+
+Format as a clean markdown file. Be specific — vague briefs produce vague results.
+Output ONLY the markdown content of brief.md, nothing else.
+PROMPT
+)
+
+DRAFT=$(echo "$SYNTHESIS_PROMPT" | claude -p --dangerously-skip-permissions 2>/dev/null) || {
+  log_warn "Claude unavailable — using template instead"
+  DRAFT=$(cat "$RUNNER_REPO/templates/brief.md" \
+    | sed "s/{{JOB_NAME}}/$JOB/g" \
+    | sed "s|{{OUTPUT}}|$OUTPUT_LOCATION|g")
+}
+
+# ── Review loop ────────────────────────────────────────────────────────────────
+
+while true; do
+  echo ""
+  log_section "Draft brief"
+  echo ""
+  echo "$DRAFT"
+  echo ""
+  echo "─────────────────────────────────────────────"
+
+  echo ""
+  echo "  r) ready — save this and print launch command"
+  echo "  e) edit  — open in editor"
+  echo "  f) refine — tell Claude what to change"
+  echo "  q) quit  — discard"
+  echo ""
+  printf "${CYAN}?${RESET} Choice [r/e/f/q]: "
+  read -r choice
+
+  case "$choice" in
+    r|R|"")
+      ensure_dir "$JOB_DIR"
+      echo "$DRAFT" > "$BRIEF"
+      # Scaffold the other state files from templates
+      [[ -f "$JOB_DIR/state.md" ]]     || cp "$RUNNER_REPO/templates/state.md"     "$JOB_DIR/state.md"
+      [[ -f "$JOB_DIR/decisions.md" ]] || cp "$RUNNER_REPO/templates/decisions.md" "$JOB_DIR/decisions.md"
+      [[ -f "$JOB_DIR/watcher.md" ]]   || cp "$RUNNER_REPO/templates/watcher.md"   "$JOB_DIR/watcher.md"
+      echo ""
+      log_info "Brief saved to $BRIEF"
+      echo ""
+      echo "  Launch with:"
+      echo "  ${BOLD}kiro-job $JOB $PROJECT_DIR $INTERVAL${RESET}"
+      echo ""
+      break
+      ;;
+    e|E)
+      "${EDITOR:-kiro}" "$BRIEF" 2>/dev/null || "${VISUAL:-vi}" "$BRIEF"
+      DRAFT=$(cat "$BRIEF")
+      ;;
+    f|F)
+      FEEDBACK=$(ask "What should Claude change?")
+      REFINE_PROMPT="Here is the current brief:\n\n$DRAFT\n\nFeedback: $FEEDBACK\n\nRewrite the brief incorporating this feedback. Output ONLY the markdown content."
+      DRAFT=$(echo "$REFINE_PROMPT" | claude -p --dangerously-skip-permissions 2>/dev/null) || {
+        log_warn "Claude unavailable"
+      }
+      ;;
+    q|Q)
+      log_warn "Discarded. Nothing saved."
+      exit 0
+      ;;
+    *)
+      log_warn "Unknown choice: $choice"
+      ;;
+  esac
+done
+
+# Record that this job was briefed
+append_long_term_decision "Created brief for job: $JOB" "Goal: $(echo "$GOAL" | head -1)"

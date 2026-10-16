@@ -1,0 +1,42 @@
+#!/bin/zsh
+# kiro-watch — Live tail of Kiro/Claude agent activity log
+# Works from any directory. Log always at ~/.kiro-runner/activity.log
+
+RUNNER_REPO="$(cd "$(dirname "${BASH_SOURCE[0]:-${(%):-%x}}")/.." && pwd)"
+source "$RUNNER_REPO/lib/common.sh"
+
+LOG="$RUNNER_ACTIVITY_LOG"
+
+mkdir -p "$(dirname "$LOG")"
+touch "$LOG"
+
+colorize() {
+  sed \
+    -e 's/read_file/📖 read_file/g' \
+    -e 's/read_code/📖 read_code/g' \
+    -e 's/fs_write/✍️  fs_write/g' \
+    -e 's/str_replace/✏️  str_replace/g' \
+    -e 's/fs_append/➕ fs_append/g' \
+    -e 's/execute_bash/💻 execute_bash/g' \
+    -e 's/grep_search/🔍 grep_search/g' \
+    -e 's/file_search/🔍 file_search/g' \
+    -e 's/remote_web_search/🌐 remote_web_search/g' \
+    -e 's/web_fetch/🌐 web_fetch/g' \
+    -e 's/invoke_sub_agent/🤖 invoke_sub_agent/g' \
+    -e 's/create_artifact/🎨 create_artifact/g' \
+    -e 's/list_directory/📁 list_directory/g' \
+    -e 's/delete_file/🗑️  delete_file/g' \
+    -e 's/control_bash_process/⚙️  control_bash_process/g'
+}
+
+clear
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  🤖 Agent Activity Monitor"
+echo "  Log : $LOG"
+echo "  Time: $(date '+%Y-%m-%d %H:%M:%S')"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+tail -n 20 "$LOG" | colorize
+echo "--- live ---"
+tail -f "$LOG" | colorize

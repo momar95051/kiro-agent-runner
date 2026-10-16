@@ -1,0 +1,122 @@
+#!/bin/zsh
+# kiro-job — Launch a Claude Code worker + watcher for any project
+#
+# Usage:
+#   kiro-job <job_name> [project_dir] [interval_minutes]
+#
+# Examples:
+#   kiro-job startup-ideas                          # current dir, default interval
+#   kiro-job startup-ideas ~/projects/myapp         # explicit project dir
+#   kiro-job startup-ideas ~/projects/myapp 60      # check every 60 min
+
+set -euo pipefail
+
+RUNNER_REPO="$(cd "$(dirname "${BASH_SOURCE[0]:-${(%):-%x}}")/.." && pwd)"
+source "$RUNNER_REPO/lib/common.sh"
+source "$RUNNER_REPO/lib/preflight.sh"
+source "$RUNNER_REPO/lib/memory.sh"
+
+JOB="${1:?Usage: $0 <job_name> [project_dir] [interval_minutes]}"
+PROJECT_DIR="${${2:-$PWD}:A}"
+JOB_DIR="$PROJECT_DIR/.kiro/jobs/$JOB"
+BRIEF="$JOB_DIR/brief.md"
+
+# Get interval from arg, preferences, or default
+DEFAULT_INTERVAL=$(grep 'default_watcher_interval_minutes' "$RUNNER_MEMORY/preferences.md" 2>/dev/null | grep -o '[0-9]*' || echo "180")
+INTERVAL="${3:-$DEFAULT_INTERVAL}"
+
+WORKER_SESSION="worker-$JOB"
+MONITOR_SESSION="monitor-$JOB"
+
+# ── Preflight ─────────────────────────────────────────────────────────────────
+
+log_section "kiro-job — $JOB"
+run_preflight || exit 1
+
+# ── Brief check ───────────────────────────────────────────────────────────────
+
+if [[ ! -f "$BRIEF" ]]; then
+  log_warn "No brief found at $BRIEF"
+  if confirm "Run kiro-brief to scaffold it now?"; then
+    "$RUNNER_REPO/bin/kiro-brief" "$JOB" "$PROJECT_DIR"
+  else
+    exit 0
+  fi
+fi
+
+# Scaffold missing state files from templates
+ensure_dir "$JOB_DIR"
+[[ -f "$JOB_DIR/state.md" ]]     || cp "$RUNNER_REPO/templates/state.md"     "$JOB_DIR/state.md"
+[[ -f "$JOB_DIR/decisions.md" ]] || cp "$RUNNER_REPO/templates/decisions.md" "$JOB_DIR/decisions.md"
+[[ -f "$JOB_DIR/watcher.md" ]]   || cp "$RUNNER_REPO/templates/watcher.md"   "$JOB_DIR/watcher.md"
+
+echo ""
+echo "  Job        : $JOB"
+echo "  Project    : $PROJECT_DIR"
+echo "  Brief      : $BRIEF"
+echo "  Interval   : every ${INTERVAL}m"
+echo "  Worker     : tmux '$WORKER_SESSION'"
+echo "  Monitor    : tmux '$MONITOR_SESSION'"
+echo ""
+
+# ── Kill existing sessions ─────────────────────────────────────────────────────
+
+tmux kill-session -t "$WORKER_SESSION"  2>/dev/null && log_warn "Killed existing worker session" || true
+tmux kill-session -t "$MONITOR_SESSION" 2>/dev/null && log_warn "Killed existing monitor session" || true
+
+# ── Launch worker ─────────────────────────────────────────────────────────────
+
+log_step "Launching worker..."
+
+tmux new-session -d -s "$WORKER_SESSION" -x 220 -y 50
+
+# Avoid /tmp issues on macOS
+tmux send-keys -t "$WORKER_SESSION" \
+  "export TMPDIR=\"$HOME/.claude-tmp\" && mkdir -p \"\$TMPDIR\"" Enter
+sleep 0.5
+
+tmux send-keys -t "$WORKER_SESSION" "cd $PROJECT_DIR" Enter
+sleep 0.5
+
+# Inject profile context as an env var the goal line can reference
+PROFILE_SUMMARY=$(read_profile | head -10)
+
+tmux send-keys -t "$WORKER_SESSION" "claude --dangerously-skip-permissions" Enter
+sleep 3
+
+# Keep goal line short — point at the brief file
+GOAL_LINE="/goal See $BRIEF for the full job definition. Work through it autonomously. Re-read $JOB_DIR/decisions.md each turn — newer entries override the brief. Write your current status to $JOB_DIR/state.md after each step. If you cannot proceed without a human decision, write BLOCKED: <reason> to $JOB_DIR/state.md and stop cleanly."
+
+tmux send-keys -t "$WORKER_SESSION" "$GOAL_LINE" Enter
+log_info "Worker launched in session: $WORKER_SESSION"
+
+# ── Launch monitor ────────────────────────────────────────────────────────────
+
+log_step "Launching monitor..."
+
+tmux new-session -d -s "$MONITOR_SESSION" -x 220 -y 50
+
+# Left pane: watcher
+tmux send-keys -t "$MONITOR_SESSION" \
+  "$RUNNER_REPO/bin/kiro-watcher \"$JOB_DIR\" \"$WORKER_SESSION\" \"$INTERVAL\"" Enter
+
+# Right pane: activity feed
+tmux split-window -h -t "$MONITOR_SESSION"
+tmux send-keys -t "$MONITOR_SESSION" \
+  "$RUNNER_REPO/bin/kiro-watch" Enter
+
+tmux select-pane -t "$MONITOR_SESSION:0.0"
+log_info "Monitor launched in session: $MONITOR_SESSION"
+
+# ── Attach ────────────────────────────────────────────────────────────────────
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  Attaching to monitor. Ctrl+B → S to switch sessions."
+echo ""
+echo "  To add a decision mid-job:"
+echo "    echo \"\$(date +%Y-%m-%d): your note\" >> $JOB_DIR/decisions.md"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+tmux attach -t "$MONITOR_SESSION"

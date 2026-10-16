@@ -1,0 +1,10 @@
+# Personal memory — never commit (contains your profile/decisions)
+memory/learnings.md
+memory/decisions.md
+
+# Runtime artifacts
+*.log
+.DS_Store
+
+# Job outputs (project-specific, stay in the project repo)
+# .kiro/jobs/ is intentionally NOT ignored — brief.md should be committed

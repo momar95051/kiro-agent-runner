@@ -1,0 +1,200 @@
+#!/bin/zsh
+# kiro-watcher — Claude Code watcher that monitors a worker tmux session
+#
+# Usage:
+#   kiro-watcher <job_dir> <worker_session> [interval_minutes]
+
+set -euo pipefail
+
+RUNNER_REPO="$(cd "$(dirname "${BASH_SOURCE[0]:-${(%):-%x}}")/.." && pwd)"
+source "$RUNNER_REPO/lib/common.sh"
+source "$RUNNER_REPO/lib/memory.sh"
+
+JOB_DIR="${${1:?Usage: $0 <job_dir> <worker_session> [interval_minutes]}:A}"
+WORKER_SESSION="${2:?Usage: $0 <job_dir> <worker_session> [interval_minutes]}"
+INTERVAL_MINUTES="${3:-180}"
+INTERVAL_SECONDS=$(( INTERVAL_MINUTES * 60 ))
+WATCHER_LOG="$JOB_DIR/watcher-run.log"
+JOB_NAME="$(basename "$JOB_DIR")"
+
+[[ -d "$JOB_DIR" ]] || { log_error "Job dir not found: $JOB_DIR"; exit 1; }
+
+log() {
+  local ts
+  ts=$(date '+%Y-%m-%d %H:%M:%S')
+  echo "[$ts] $*" | tee -a "$WATCHER_LOG"
+}
+
+worker_running() { tmux has-session -t "$WORKER_SESSION" 2>/dev/null; }
+
+capture_screen() {
+  tmux capture-pane -t "$WORKER_SESSION" -p 2>/dev/null || echo "(could not capture pane)"
+}
+
+nudge() {
+  tmux send-keys -t "$WORKER_SESSION" "" Enter 2>/dev/null
+  sleep 1
+  tmux send-keys -t "$WORKER_SESSION" "$1" Enter 2>/dev/null
+}
+
+notify() {
+  local msg="$1" title="${2:-Kiro Watcher}"
+  osascript -e "display notification \"$msg\" with title \"$title\" sound name \"Ping\"" 2>/dev/null || \
+  notify-send "$title" "$msg" 2>/dev/null || true
+}
+
+run_tick() {
+  local tick
+  tick=$(( $(grep 'tick_count:' "$JOB_DIR/watcher.md" 2>/dev/null | grep -o '[0-9]*' || echo 0) + 1 ))
+  log "=== TICK $tick (session: $WORKER_SESSION) ==="
+
+  if ! worker_running; then
+    log "⚠️  Worker session not found: $WORKER_SESSION"
+    return
+  fi
+
+  local screen state brief decisions watcher_mem profile
+  screen=$(capture_screen)
+  state=$(cat "$JOB_DIR/state.md" 2>/dev/null || echo "(none)")
+  brief=$(cat "$JOB_DIR/brief.md" 2>/dev/null || echo "(none)")
+  decisions=$(cat "$JOB_DIR/decisions.md" 2>/dev/null || echo "(none)")
+  watcher_mem=$(cat "$JOB_DIR/watcher.md" 2>/dev/null || echo "(none)")
+  profile=$(read_profile | head -5)
+
+  local prompt
+  prompt=$(cat <<PROMPT
+You are a watcher agent monitoring a Claude Code worker running in tmux.
+
+## Founder profile
+$profile
+
+## Worker screen (tmux capture-pane)
+\`\`\`
+$screen
+\`\`\`
+
+## state.md
+$state
+
+## brief.md (summary)
+$(echo "$brief" | head -30)
+
+## decisions.md
+$decisions
+
+## Your memory (watcher.md)
+$watcher_mem
+
+## Decision
+Assess the worker state and output EXACTLY ONE of:
+
+  ACTION: sleep
+  REASON: <worker is actively progressing — one line>
+
+  ACTION: nudge
+  MESSAGE: <what to type into the worker, max 280 chars>
+
+  ACTION: alert
+  REASON: <copy BLOCKED reason from state.md>
+
+  ACTION: done
+  SUMMARY: <one line of what was accomplished>
+
+Then output your updated memory (required):
+
+  MEMORY_UPDATE:
+  last_commit_checked: <hash or "unchanged">
+  last_nudge_sent: <ISO timestamp or "unchanged">
+  tick_count: $tick
+
+Rules:
+- If the worker is typing or running tools → sleep
+- If the worker prompt is idle and the goal is still set → nudge
+- If state.md contains BLOCKED → alert
+- If state.md or screen shows "Goal achieved" → done
+PROMPT
+)
+
+  log "🤖 Running watcher tick..."
+  local response
+  response=$(echo "$prompt" | claude -p --dangerously-skip-permissions 2>/dev/null) || {
+    log "❌ Claude watcher call failed"
+    return
+  }
+
+  log "📋 Response:"
+  echo "$response" | while IFS= read -r line; do log "   $line"; done
+
+  local action
+  action=$(echo "$response" | grep '^ACTION:' | head -1 | sed 's/^ACTION: *//')
+
+  case "$action" in
+    nudge)
+      local msg
+      msg=$(echo "$response" | grep '^MESSAGE:' | head -1 | sed 's/^MESSAGE: *//')
+      log "📤 Nudging: $msg"
+      nudge "$msg"
+      ;;
+    sleep)
+      local reason
+      reason=$(echo "$response" | grep '^REASON:' | head -1 | sed 's/^REASON: *//')
+      log "😴 Sleeping: $reason"
+      ;;
+    alert)
+      local reason
+      reason=$(echo "$response" | grep '^REASON:' | head -1 | sed 's/^REASON: *//')
+      log "🚨 BLOCKED: $reason"
+      notify "Worker blocked: $reason" "Kiro Watcher [$JOB_NAME]"
+      ;;
+    done)
+      local summary
+      summary=$(echo "$response" | grep '^SUMMARY:' | head -1 | sed 's/^SUMMARY: *//')
+      log "✅ DONE: $summary"
+      notify "✅ $summary" "Kiro Watcher [$JOB_NAME]: Done!"
+      # Append to long-term learnings
+      append_learning "$JOB_NAME" "$summary" "success"
+      echo "GOAL_ACHIEVED" >> "$WATCHER_LOG"
+      ;;
+    *)
+      log "⚠️  Unknown action: '$action'"
+      ;;
+  esac
+
+  # Update watcher memory
+  local mem
+  mem=$(echo "$response" | awk '/^MEMORY_UPDATE:/{found=1; next} found{print}' | head -5)
+  if [[ -n "$mem" ]]; then
+    cat > "$JOB_DIR/watcher.md" <<EOF
+# Watcher Memory
+<!-- Tick $tick — $(ts) -->
+
+$mem
+EOF
+    log "💾 Memory updated"
+  fi
+}
+
+# ── Main loop ──────────────────────────────────────────────────────────────────
+
+log "🚀 Watcher started — job: $JOB_NAME"
+log "   Job dir  : $JOB_DIR"
+log "   Worker   : $WORKER_SESSION"
+log "   Interval : ${INTERVAL_MINUTES}m"
+
+MAX_TICKS=56  # ~7 days at 3h intervals
+tick=0
+
+while (( tick < MAX_TICKS )); do
+  run_tick
+  (( tick++ ))
+
+  if tail -5 "$WATCHER_LOG" 2>/dev/null | grep -q "GOAL_ACHIEVED"; then
+    log "🎉 Job complete. Watcher exiting."
+    exit 0
+  fi
+
+  log "⏱  Next check in ${INTERVAL_MINUTES}m..."
+  sleep "$INTERVAL_SECONDS"
+done
+
+log "⏰ Max ticks ($MAX_TICKS) reached. Re-run kiro-watcher if job still running."

@@ -1,0 +1,92 @@
+#!/bin/zsh
+# kiro-init — One-time setup of long-term memory profile
+#
+# Usage: kiro-init [--reset]
+
+RUNNER_REPO="$(cd "$(dirname "${BASH_SOURCE[0]:-${(%):-%x}}")/.." && pwd)"
+source "$RUNNER_REPO/lib/common.sh"
+source "$RUNNER_REPO/lib/preflight.sh"
+
+RESET=false
+[[ "${1:-}" == "--reset" ]] && RESET=true
+
+log_section "kiro-init — Setting up your profile"
+
+# Create memory dir
+ensure_dir "$RUNNER_MEMORY"
+
+if [[ -f "$RUNNER_MEMORY/profile.md" ]] && ! $RESET; then
+  echo ""
+  log_info "Profile already exists at $RUNNER_MEMORY/profile.md"
+  if ! confirm "Re-run setup and overwrite?"; then
+    echo "Run 'kiro-init --reset' to force."
+    exit 0
+  fi
+fi
+
+echo ""
+echo "I'll ask you a few questions to build your profile."
+echo "This is used to pre-fill every job brief — be specific."
+echo ""
+
+NAME=$(ask "Your name")
+ROLE=$(ask "Your current role" "Solution Architect")
+EXPERTISE=$(ask_multiline "Your technical expertise (e.g. AWS, cloud architecture, AI/ML)")
+DOMAINS=$(ask_multiline "Domains you work in (e.g. Healthcare, Pharma, SaaS, FinTech)")
+LOCATION=$(ask "Your location / market focus" "Egypt / MENA")
+GOALS=$(ask_multiline "What are you trying to build / achieve?")
+
+echo ""
+log_section "Working Preferences"
+
+INTERVAL=$(ask "Default watcher interval in minutes" "180")
+LANGUAGE=$(ask "Preferred output language" "English")
+RULES=$(ask_multiline "Default rules for all jobs (one per line)")
+
+# Write profile
+cat > "$RUNNER_MEMORY/profile.md" <<EOF
+# Profile
+
+name: $NAME
+role: $ROLE
+location: $LOCATION
+
+## Technical Expertise
+$EXPERTISE
+
+## Domain Knowledge
+$DOMAINS
+
+## Goals
+$GOALS
+EOF
+
+# Write preferences
+cat > "$RUNNER_MEMORY/preferences.md" <<EOF
+# Preferences
+
+default_watcher_interval_minutes: $INTERVAL
+default_output_language: $LANGUAGE
+notify_on_done: true
+notify_on_blocked: true
+
+## Default Rules
+$RULES
+- Do not push directly to main
+- Cite all sources with URLs
+- Do not invent data — find real numbers or say "no public data found"
+- If blocked without a human decision, write BLOCKED: <reason> to state.md and stop
+EOF
+
+# Copy blank learnings/decisions if not present
+[[ -f "$RUNNER_MEMORY/learnings.md" ]] || cp "$RUNNER_REPO/memory/learnings.md" "$RUNNER_MEMORY/learnings.md"
+[[ -f "$RUNNER_MEMORY/decisions.md" ]] || cp "$RUNNER_REPO/memory/decisions.md" "$RUNNER_MEMORY/decisions.md"
+
+echo ""
+log_section "Done"
+log_info "Profile saved to $RUNNER_MEMORY/profile.md"
+log_info "Preferences saved to $RUNNER_MEMORY/preferences.md"
+echo ""
+echo "Next steps:"
+echo "  1. Run 'kiro-brief <job-name>' to scaffold your first job"
+echo "  2. Run 'kiro-job <job-name>' to launch it"
